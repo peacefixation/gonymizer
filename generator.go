@@ -133,17 +133,19 @@ func ProcessDumpFile(config ProcessConfig) error {
 	}
 	defer dstFile.Close()
 
+	fileWriter := bufio.NewWriter(dstFile)
+
 	// Call fileInjector to write any required configuration settings to the top of the
 	// processed dump file
 	if len(config.PreprocessFilename) > 0 {
-		if err = fileInjector(config.PreprocessFilename, dstFile); err != nil {
+		if err = fileInjector(config.PreprocessFilename, fileWriter); err != nil {
 			log.Error("Unable to run preProcessor")
 			return err
 		}
 	}
 
 	// Always make sure we are in replication mode so we can import tables without constraints
-	if _, err := dstFile.WriteString("SET session_replication_role = 'replica';\n"); err != nil {
+	if _, err := fileWriter.WriteString("SET session_replication_role = 'replica';\n"); err != nil {
 		return err
 	}
 
@@ -183,7 +185,7 @@ func ProcessDumpFile(config ProcessConfig) error {
 			return err
 		}
 
-		bytesWritten, err := dstFile.WriteString(outputLine)
+		bytesWritten, err := fileWriter.WriteString(outputLine)
 		if err != nil {
 			log.Error(err)
 			log.Debug("src: ", config.SourceFilename)
@@ -210,15 +212,21 @@ func ProcessDumpFile(config ProcessConfig) error {
 	}
 	// Add in SQL at the end of the dump file
 	if len(config.PostprocessFilename) > 0 {
-		if err = fileInjector(config.PostprocessFilename, dstFile); err != nil {
+		if err = fileInjector(config.PostprocessFilename, fileWriter); err != nil {
 			return err
 		}
 	}
 
 	// Enable constraints (they were disabled earlier)
-	if _, err := dstFile.WriteString("SET session_replication_role = 'origin';\n"); err != nil {
+	if _, err := fileWriter.WriteString("SET session_replication_role = 'origin';\n"); err != nil {
 		return err
 	}
+
+	err = fileWriter.Flush()
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -429,7 +437,7 @@ func (curLine *LineState) parseCopyLine(inputLine string) {
 }
 
 // fileInjector writes data to the current position in the destination file from the source file
-func fileInjector(srcFileName string, dstFile *os.File) error {
+func fileInjector(srcFileName string, writer StringWriter) error {
 	srcFile, err := os.Open(srcFileName)
 	if err != nil {
 		return err
@@ -444,7 +452,7 @@ func fileInjector(srcFileName string, dstFile *os.File) error {
 --
 
 `, srcFileName)
-	if _, err := dstFile.WriteString(startTag); err != nil {
+	if _, err := writer.WriteString(startTag); err != nil {
 		return err
 	}
 
@@ -458,7 +466,7 @@ func fileInjector(srcFileName string, dstFile *os.File) error {
 			}
 		}
 		// Copy data from the source file into processed dump file
-		_, err = dstFile.WriteString(inputLine)
+		_, err = writer.WriteString(inputLine)
 		if err != nil {
 			return nil
 		}
@@ -471,7 +479,7 @@ func fileInjector(srcFileName string, dstFile *os.File) error {
 --
 `, srcFileName)
 
-	_, err = dstFile.WriteString(endTag)
+	_, err = writer.WriteString(endTag)
 	return err
 }
 

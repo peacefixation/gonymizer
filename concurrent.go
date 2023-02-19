@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	log "github.com/sirupsen/logrus"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // maxLinesPerChunk bounds the number of lines per chunk.
@@ -269,48 +270,57 @@ func mergeFiles(config ProcessConfig) error {
 	return nil
 }
 
-// startChunkWorkers takes a receive-only channel of chunks and processes each chunk, writing them to file.
+// startChunkWorker takes a receive-only channel of chunks and processes each chunk, writing them to file.
 func startChunkWorker(chunks <-chan Chunk, wg *sync.WaitGroup, mapper ColumnMapperContainer) {
 	defer wg.Done()
 
 	for chunk := range chunks {
-		dst := chunk.Filename()
-
-		dstFile, err := os.Create(dst)
+		err := processChunk(chunk, mapper)
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		processChunk(chunk, dstFile, mapper)
-
-		err = dstFile.Close()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		log.Infof("%s written to file", dst)
 	}
 }
 
 // processChunk reads data from a Chunk and writes to a destination file handler.
-func processChunk(chunk Chunk, dstFile StringWriter, mapper ColumnMapperContainer) {
+func processChunk(chunk Chunk, mapper ColumnMapperContainer) error {
 	reader := bufio.NewReader(strings.NewReader(chunk.Data.String()))
+
+	dstFile, err := os.Create(chunk.Filename())
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	writer := bufio.NewWriter(dstFile)
 
 	cmaps, err := getColumnMappers(mapper, chunk)
 	if err != nil {
-		log.Fatalf("%s: Please add to Map file", err.Error())
+		return fmt.Errorf("%s: Please add to Map file", err.Error())
 	}
 
-	processFromReader(chunk, dstFile, reader, cmaps)
+	err = processFromReader(chunk, writer, reader, cmaps)
+	if err != nil {
+		return err
+	}
+
+	err = writer.Flush()
+	if err != nil {
+		return err
+	}
+
+	log.Infof("%s written to file", chunk.Filename())
+
+	return nil
 }
 
 // processFromReader reads data from a StringReader line by line, processes it and sends it to a StringWriter
-func processFromReader(chunk Chunk, writer StringWriter, reader StringReader, cmaps []*ColumnMapper) {
+func processFromReader(chunk Chunk, writer StringWriter, reader StringReader, cmaps []*ColumnMapper) error {
 	for i := 0; i > -1; i++ {
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			if err != io.EOF {
-				log.Fatal(err)
+				return err
 			}
 			break
 		}
@@ -324,7 +334,7 @@ func processFromReader(chunk Chunk, writer StringWriter, reader StringReader, cm
 		if aboveData || isEnd || isEmpty || hasNoData {
 			_, err = writer.WriteString(input)
 			if err != nil {
-				log.Fatal(err)
+				return err
 			}
 			continue
 		}
@@ -332,9 +342,11 @@ func processFromReader(chunk Chunk, writer StringWriter, reader StringReader, cm
 		output := processRowFromChunk(cmaps, input, chunk)
 		_, err = writer.WriteString(output)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 	}
+
+	return nil
 }
 
 // getColumnMappers returns a slice of references to ColumnMappers corresponding to the columns of the given Chunk.
